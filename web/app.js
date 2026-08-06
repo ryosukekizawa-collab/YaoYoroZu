@@ -20,6 +20,7 @@ const controls = {
   bright: 0.28, // 明るさ・血色
   eye: 0.18,    // 目を大きく（控えめ）
   slim: 0.15,   // 輪郭スリム（控えめ）
+  mosaic: 0.0,  // モザイク（顔だけ・匿名モード）
 };
 function bindSlider(id) {
   const input = document.getElementById(id);
@@ -29,7 +30,7 @@ function bindSlider(id) {
     out.textContent = input.value;
   });
 }
-["smooth", "bright", "eye", "slim"].forEach(bindSlider);
+["smooth", "bright", "eye", "slim", "mosaic"].forEach(bindSlider);
 
 // プリセット
 const PRESETS = {
@@ -89,6 +90,7 @@ uniform float uSmooth;
 uniform float uBright;
 uniform float uEye;
 uniform float uSlim;
+uniform float uMosaic;     // モザイク（顔だけ）
 
 uniform vec2  uEyeL;       // 左目中心（video空間 0..1）
 uniform vec2  uEyeR;       // 右目中心
@@ -134,15 +136,19 @@ void main() {
     return;
   }
 
-  vec2 src = raw;
-  src = slimFace(src, uFaceCx, uOvalC, uOvalR, uSlim);
-  src = magnify(src, uEyeL, uEyeRad, uEye);
-  src = magnify(src, uEyeR, uEyeRad, uEye);
+  // 顔マスク（内側=1, 外側=0）。変形も加工もこの内側だけに限定して背景を歪ませない。
+  float mask = ovalMask(raw, uOvalC, uOvalR);
+
+  // 変形（目・輪郭）は顔の内側だけに適用。外側は raw のまま＝背景は歪まない。
+  vec2 warped = raw;
+  warped = slimFace(warped, uFaceCx, uOvalC, uOvalR, uSlim);
+  warped = magnify(warped, uEyeL, uEyeRad, uEye);
+  warped = magnify(warped, uEyeR, uEyeRad, uEye);
+  vec2 src = mix(raw, warped, mask);
 
   vec3 col = texture(uTex, src).rgb;
 
   // 美肌：周囲を平均したぼかしを顔マスクの範囲だけブレンド
-  float mask = ovalMask(raw, uOvalC, uOvalR);
   if (uSmooth > 0.001 && mask > 0.001) {
     vec3 blur = vec3(0.0);
     float total = 0.0;
@@ -159,6 +165,15 @@ void main() {
 
   // 明るさ・血色（顔だけ・控えめに）
   col += uBright * mask * vec3(0.07, 0.035, 0.04);
+
+  // モザイク（顔だけ・匿名モード）。値が大きいほどブロックが粗くなる。
+  if (uMosaic > 0.001) {
+    float blocks = mix(90.0, 14.0, clamp(uMosaic, 0.0, 1.0));
+    vec2 q = (floor(src * blocks) + 0.5) / blocks;
+    vec3 mos = texture(uTex, q).rgb;
+    col = mix(col, mos, mask * clamp(uMosaic * 1.3, 0.0, 1.0));
+  }
+
   col = clamp(col, 0.0, 1.0);
 
   outColor = vec4(col, 1.0);
@@ -195,7 +210,7 @@ gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
 const U = {};
-for (const name of ["uTex","uTexel","uAspect","uHasFace","uBypass","uMirror","uSmooth","uBright","uEye","uSlim","uEyeL","uEyeR","uEyeRad","uFaceCx","uOvalC","uOvalR"]) {
+for (const name of ["uTex","uTexel","uAspect","uHasFace","uBypass","uMirror","uSmooth","uBright","uEye","uSlim","uMosaic","uEyeL","uEyeR","uEyeRad","uFaceCx","uOvalC","uOvalR"]) {
   U[name] = gl.getUniformLocation(prog, name);
 }
 
@@ -256,6 +271,7 @@ function render() {
   gl.uniform1f(U.uBright, controls.bright);
   gl.uniform1f(U.uEye, controls.eye);
   gl.uniform1f(U.uSlim, controls.slim);
+  gl.uniform1f(U.uMosaic, controls.mosaic);
 
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, tex);
