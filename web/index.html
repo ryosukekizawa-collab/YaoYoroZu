@@ -1,0 +1,53 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>YaoYoroZu — 顔加工MVP</title>
+<link rel="stylesheet" href="./style.css" />
+
+<div id="app">
+  <header>
+    <h1>YaoYoroZu <span>顔加工MVP</span></h1>
+    <p class="sub">カメラ映像をリアルタイムで「可愛く＋少し違う顔」に変換します。この加工済み映像がWebRTC通話に流れます。</p>
+  </header>
+
+  <div class="stage">
+    <div class="view">
+      <video id="input" playsinline muted></video>
+      <canvas id="output"></canvas>
+      <div id="status" class="status">「カメラ開始」を押してください</div>
+      <div class="fps" id="fps"></div>
+    </div>
+
+    <aside class="panel">
+      <div class="row">
+        <button id="startBtn" class="primary">カメラ開始</button>
+        <button id="compareBtn" class="ghost" disabled>加工前と比較（長押し）</button>
+      </div>
+
+      <label>美肌 <output id="smoothOut">0.55</output>
+        <input id="smooth" type="range" min="0" max="1" step="0.01" value="0.55" />
+      </label>
+      <label>明るさ・血色 <output id="brightOut">0.35</output>
+        <input id="bright" type="range" min="0" max="1" step="0.01" value="0.35" />
+      </label>
+      <label>目を大きく <output id="eyeOut">0.30</output>
+        <input id="eye" type="range" min="0" max="0.7" step="0.01" value="0.30" />
+      </label>
+      <label>輪郭スリム <output id="slimOut">0.25</output>
+        <input id="slim" type="range" min="0" max="0.7" step="0.01" value="0.25" />
+      </label>
+
+      <div class="presets">
+        <span>プリセット:</span>
+        <button data-preset="natural" class="ghost">ナチュラル</button>
+        <button data-preset="cute" class="ghost">可愛い</button>
+        <button data-preset="another" class="ghost">別人寄り</button>
+      </div>
+
+      <p class="note">
+        「別人寄り」は本人と輪郭・目元を変えます。強くすると崩れやすいので、まずは<strong>ナチュラル〜可愛い</strong>の範囲で方向性を確認するのがおすすめです。
+      </p>
+    </aside>
+  </div>
+</div>
+
+<script type="module" src="./app.js"></script>
