@@ -16,10 +16,10 @@ const compareBtn = document.getElementById("compareBtn");
 
 // スライダー
 const controls = {
-  smooth: 0.55, // 美肌（肌の平滑化）
-  bright: 0.35, // 明るさ・血色
-  eye: 0.30,    // 目を大きく
-  slim: 0.25,   // 輪郭スリム
+  smooth: 0.50, // 美肌（肌の平滑化）
+  bright: 0.28, // 明るさ・血色
+  eye: 0.18,    // 目を大きく（控えめ）
+  slim: 0.15,   // 輪郭スリム（控えめ）
 };
 function bindSlider(id) {
   const input = document.getElementById(id);
@@ -33,9 +33,9 @@ function bindSlider(id) {
 
 // プリセット
 const PRESETS = {
-  natural: { smooth: 0.35, bright: 0.20, eye: 0.12, slim: 0.10 },
-  cute:    { smooth: 0.60, bright: 0.40, eye: 0.32, slim: 0.28 },
-  another: { smooth: 0.55, bright: 0.35, eye: 0.55, slim: 0.55 },
+  natural: { smooth: 0.40, bright: 0.22, eye: 0.10, slim: 0.08 },
+  beauty:  { smooth: 0.55, bright: 0.32, eye: 0.20, slim: 0.16 },
+  strong:  { smooth: 0.65, bright: 0.40, eye: 0.34, slim: 0.28 },
 };
 document.querySelectorAll("[data-preset]").forEach((b) => {
   b.addEventListener("click", () => {
@@ -83,6 +83,7 @@ uniform vec2  uTexel;      // 1/解像度
 uniform float uAspect;     // 幅/高さ（円形補正用）
 uniform int   uHasFace;
 uniform int   uBypass;
+uniform int   uMirror;     // 左右ミラー（自撮り用）
 
 uniform float uSmooth;
 uniform float uBright;
@@ -102,8 +103,9 @@ vec2 magnify(vec2 uv, vec2 c, float R, float strength) {
   d.x *= uAspect;
   float r = length(d);
   if (r < R) {
-    // 中心ほど「内側」をサンプル＝拡大。縁でなめらかに1.0へ戻す。
-    float s = mix(1.0 - strength, 1.0, smoothstep(0.0, R, r));
+    // 中心ほど「内側」をサンプル＝拡大。縁でなめらかに1.0へ戻す。控えめに。
+    float t = r / R;
+    float s = mix(1.0 - strength * 0.55, 1.0, smoothstep(0.0, 1.0, t));
     d *= s;
   }
   d.x /= uAspect;
@@ -114,7 +116,7 @@ vec2 magnify(vec2 uv, vec2 c, float R, float strength) {
 vec2 slimFace(vec2 uv, float cx, vec2 ovalC, vec2 ovalR, float strength) {
   float band = smoothstep(ovalC.y - ovalR.y * 0.1, ovalC.y + ovalR.y, uv.y);
   float dx = uv.x - cx;
-  uv.x = cx + dx * (1.0 + strength * band);
+  uv.x = cx + dx * (1.0 + strength * 0.35 * band);
   return uv;
 }
 
@@ -124,12 +126,15 @@ float ovalMask(vec2 uv, vec2 c, vec2 r) {
 }
 
 void main() {
+  // canvas座標(y上向き) → 映像座標(y下向き＝ランドマークと同じ、左右はミラー)
+  vec2 raw = vec2(uMirror == 1 ? 1.0 - vUv.x : vUv.x, 1.0 - vUv.y);
+
   if (uBypass == 1 || uHasFace == 0) {
-    outColor = texture(uTex, vUv);
+    outColor = texture(uTex, raw);
     return;
   }
 
-  vec2 src = vUv;
+  vec2 src = raw;
   src = slimFace(src, uFaceCx, uOvalC, uOvalR, uSlim);
   src = magnify(src, uEyeL, uEyeRad, uEye);
   src = magnify(src, uEyeR, uEyeRad, uEye);
@@ -137,23 +142,23 @@ void main() {
   vec3 col = texture(uTex, src).rgb;
 
   // 美肌：周囲を平均したぼかしを顔マスクの範囲だけブレンド
-  float mask = ovalMask(vUv, uOvalC, uOvalR);
+  float mask = ovalMask(raw, uOvalC, uOvalR);
   if (uSmooth > 0.001 && mask > 0.001) {
     vec3 blur = vec3(0.0);
     float total = 0.0;
     for (int y = -2; y <= 2; y++) {
       for (int x = -2; x <= 2; x++) {
-        vec2 off = vec2(float(x), float(y)) * uTexel * 2.2;
+        vec2 off = vec2(float(x), float(y)) * uTexel * 2.6;
         blur += texture(uTex, src + off).rgb;
         total += 1.0;
       }
     }
     blur /= total;
-    col = mix(col, blur, clamp(uSmooth, 0.0, 0.95) * mask);
+    col = mix(col, blur, clamp(uSmooth, 0.0, 0.9) * mask);
   }
 
-  // 明るさ・血色（顔だけ）
-  col += uBright * mask * vec3(0.10, 0.04, 0.05);
+  // 明るさ・血色（顔だけ・控えめに）
+  col += uBright * mask * vec3(0.07, 0.035, 0.04);
   col = clamp(col, 0.0, 1.0);
 
   outColor = vec4(col, 1.0);
@@ -190,7 +195,7 @@ gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
 const U = {};
-for (const name of ["uTex","uTexel","uAspect","uHasFace","uBypass","uSmooth","uBright","uEye","uSlim","uEyeL","uEyeR","uEyeRad","uFaceCx","uOvalC","uOvalR"]) {
+for (const name of ["uTex","uTexel","uAspect","uHasFace","uBypass","uMirror","uSmooth","uBright","uEye","uSlim","uEyeL","uEyeR","uEyeRad","uFaceCx","uOvalC","uOvalR"]) {
   U[name] = gl.getUniformLocation(prog, name);
 }
 
@@ -235,7 +240,7 @@ function setUniformsFromFace(lm) {
   gl.uniform1i(U.uHasFace, 1);
   gl.uniform2f(U.uEyeL, eyeL[0], eyeL[1]);
   gl.uniform2f(U.uEyeR, eyeR[0], eyeR[1]);
-  gl.uniform1f(U.uEyeRad, Math.max(eyeW * 1.6, 0.03));
+  gl.uniform1f(U.uEyeRad, Math.max(eyeW * 1.25, 0.025));
   gl.uniform1f(U.uFaceCx, faceCx);
   gl.uniform2f(U.uOvalC, ovalCx, ovalCy);
   gl.uniform2f(U.uOvalR, ovalRx, ovalRy);
@@ -246,6 +251,7 @@ function render() {
   gl.uniform2f(U.uTexel, 1 / canvas.width, 1 / canvas.height);
   gl.uniform1f(U.uAspect, canvas.width / canvas.height);
   gl.uniform1i(U.uBypass, bypass ? 1 : 0);
+  gl.uniform1i(U.uMirror, 1);
   gl.uniform1f(U.uSmooth, controls.smooth);
   gl.uniform1f(U.uBright, controls.bright);
   gl.uniform1f(U.uEye, controls.eye);
