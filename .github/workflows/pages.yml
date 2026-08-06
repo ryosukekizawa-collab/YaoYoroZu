@@ -25,6 +25,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true   # Pagesを自動で有効化（Settingsでの手動切替が不要）
       - uses: actions/upload-pages-artifact@v3
         with:
           path: ./web        # web/ の中身をサイトのルートとして公開
