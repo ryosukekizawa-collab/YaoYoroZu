@@ -1,6 +1,7 @@
-// YaoYoroZu 顔加工MVP
-// カメラ → MediaPipe FaceLandmarker で顔の点を検出 → WebGLで「美肌 / 目を大きく / 輪郭スリム」
-// 出力canvasは canvas.captureStream() でそのままWebRTCに流せる（= 通話相手に届く映像）。
+// YaoYoroZu 顔加工MVP（メッシュ変形版）
+// カメラ → MediaPipe FaceLandmarker(478点) → 顔メッシュを三角形分割し、
+// 各パーツ（目・鼻・口・あご・頬…）の点を動かして WebGL でテクスチャ再描画。
+// 実写の顔をパーツ単位で「リアルに」変更する。出力canvasは captureStream() でWebRTCへ。
 
 import {
   FaceLandmarker,
@@ -14,30 +15,35 @@ const fpsEl = document.getElementById("fps");
 const startBtn = document.getElementById("startBtn");
 const compareBtn = document.getElementById("compareBtn");
 
-// スライダー
+// ---------------- パラメータ ----------------
 const controls = {
-  smooth: 0.50, // 美肌（肌の平滑化）
-  bright: 0.28, // 明るさ・血色
-  eye: 0.18,    // 目を大きく（控えめ）
-  slim: 0.15,   // 輪郭スリム（控えめ）
-  mosaic: 0.0,  // モザイク（顔だけ・匿名モード）
+  // 肌
+  smooth: 0.50, bright: 0.28, mosaic: 0.0,
+  // 顔の形
+  eyeSize: 0.12, eyeSpace: 0.0, eyeTilt: 0.0,
+  noseW: -0.08, noseL: 0.0,
+  lipFull: 0.10, mouthW: 0.0,
+  jawW: 0.12, chinL: 0.0, cheek: 0.0, faceL: 0.0,
 };
+const PRESETS = {
+  reset:   { smooth:0, bright:0, mosaic:0, eyeSize:0, eyeSpace:0, eyeTilt:0, noseW:0, noseL:0, lipFull:0, mouthW:0, jawW:0, chinL:0, cheek:0, faceL:0 },
+  natural: { smooth:.45, bright:.25, eyeSize:.08, eyeSpace:0, eyeTilt:0, noseW:-.08, noseL:0, lipFull:.08, mouthW:0, jawW:.10, chinL:0, cheek:0, faceL:0 },
+  beauty:  { smooth:.55, bright:.32, eyeSize:.16, eyeSpace:0, eyeTilt:2, noseW:-.15, noseL:-.05, lipFull:.18, mouthW:.03, jawW:.20, chinL:.04, cheek:-.05, faceL:0 },
+  another: { smooth:.55, bright:.30, eyeSize:.28, eyeSpace:.06, eyeTilt:6, noseW:-.22, noseL:.12, lipFull:.30, mouthW:-.05, jawW:.30, chinL:.12, cheek:-.10, faceL:.05 },
+};
+
+function fmt(v) { return Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(2); }
 function bindSlider(id) {
   const input = document.getElementById(id);
   const out = document.getElementById(id + "Out");
+  if (!input) return;
   input.addEventListener("input", () => {
     controls[id] = parseFloat(input.value);
-    out.textContent = input.value;
+    if (out) out.textContent = fmt(controls[id]);
   });
 }
-["smooth", "bright", "eye", "slim", "mosaic"].forEach(bindSlider);
+Object.keys(controls).forEach(bindSlider);
 
-// プリセット
-const PRESETS = {
-  natural: { smooth: 0.40, bright: 0.22, eye: 0.10, slim: 0.08 },
-  beauty:  { smooth: 0.55, bright: 0.32, eye: 0.20, slim: 0.16 },
-  strong:  { smooth: 0.65, bright: 0.40, eye: 0.34, slim: 0.28 },
-};
 document.querySelectorAll("[data-preset]").forEach((b) => {
   b.addEventListener("click", () => {
     const p = PRESETS[b.dataset.preset];
@@ -45,7 +51,7 @@ document.querySelectorAll("[data-preset]").forEach((b) => {
       controls[k] = p[k];
       const input = document.getElementById(k);
       const out = document.getElementById(k + "Out");
-      if (input) { input.value = p[k]; out.textContent = p[k].toFixed(2); }
+      if (input) { input.value = p[k]; if (out) out.textContent = fmt(p[k]); }
     }
   });
 });
@@ -55,152 +61,67 @@ let bypass = false;
 const hold = (v) => () => { bypass = v; };
 compareBtn.addEventListener("mousedown", hold(true));
 compareBtn.addEventListener("touchstart", hold(true), { passive: true });
-["mouseup", "mouseleave", "touchend"].forEach((e) =>
-  compareBtn.addEventListener(e, hold(false)));
+["mouseup", "mouseleave", "touchend"].forEach((e) => compareBtn.addEventListener(e, hold(false)));
 
-// ---------------- WebGL2 セットアップ ----------------
+// ---------------- WebGL2 ----------------
 const gl = canvas.getContext("webgl2", { premultipliedAlpha: false });
-if (!gl) {
-  statusEl.textContent = "このブラウザはWebGL2に対応していません";
-  throw new Error("no webgl2");
-}
+if (!gl) { statusEl.textContent = "このブラウザはWebGL2に対応していません"; throw new Error("no webgl2"); }
 
 const VERT = `#version 300 es
-in vec2 aPos;
-out vec2 vUv;
+in vec2 aPos;   // 変形後の位置（映像空間 0..1, y下向き）
+in vec2 aUv;    // 元の位置（テクスチャ座標）
+in float aMask; // 肌加工の強さ（顔内=1, 外=0, 目口=弱）
+uniform int uMirror;
+out vec2 vUv; out float vMask;
 void main() {
-  vUv = aPos * 0.5 + 0.5;
-  gl_Position = vec4(aPos, 0.0, 1.0);
+  float x = uMirror == 1 ? 1.0 - aPos.x : aPos.x;
+  gl_Position = vec4(x * 2.0 - 1.0, 1.0 - aPos.y * 2.0, 0.0, 1.0);
+  vUv = aUv; vMask = aMask;
 }`;
 
-// 顔のワープ（ゆがみ）は「出力座標 → どの元座標をサンプルするか」で表現する。
 const FRAG = `#version 300 es
 precision highp float;
-in vec2 vUv;
+in vec2 vUv; in float vMask;
 out vec4 outColor;
-
 uniform sampler2D uTex;
-uniform vec2  uTexel;      // 1/解像度
-uniform float uAspect;     // 幅/高さ（円形補正用）
-uniform int   uHasFace;
-uniform int   uBypass;
-uniform int   uMirror;     // 左右ミラー（自撮り用）
-
-uniform float uSmooth;
-uniform float uBright;
-uniform float uEye;
-uniform float uSlim;
-uniform float uMosaic;     // モザイク（顔だけ）
-
-uniform vec2  uEyeL;       // 左目中心（video空間 0..1）
-uniform vec2  uEyeR;       // 右目中心
-uniform float uEyeRad;     // 目の効果半径
-uniform float uFaceCx;     // 顔の中心x
-uniform vec2  uOvalC;      // 顔オーバルの中心
-uniform vec2  uOvalR;      // 顔オーバルの半径(x,y)
-
-// 局所的に拡大（目を大きく見せる）
-vec2 magnify(vec2 uv, vec2 c, float R, float strength) {
-  vec2 d = uv - c;
-  d.x *= uAspect;
-  float r = length(d);
-  if (r < R) {
-    // 中心ほど「内側」をサンプル＝拡大。縁でなめらかに1.0へ戻す。控えめに。
-    float t = r / R;
-    float s = mix(1.0 - strength * 0.55, 1.0, smoothstep(0.0, 1.0, t));
-    d *= s;
-  }
-  d.x /= uAspect;
-  return c + d;
-}
-
-// 輪郭スリム：あご付近ほど、より外側をサンプル＝横幅が縮んで見える
-vec2 slimFace(vec2 uv, float cx, vec2 ovalC, vec2 ovalR, float strength) {
-  float band = smoothstep(ovalC.y - ovalR.y * 0.1, ovalC.y + ovalR.y, uv.y);
-  float dx = uv.x - cx;
-  uv.x = cx + dx * (1.0 + strength * 0.35 * band);
-  return uv;
-}
-
-float ovalMask(vec2 uv, vec2 c, vec2 r) {
-  vec2 d = (uv - c) / r;
-  return 1.0 - smoothstep(0.82, 1.0, length(d));
-}
-
+uniform vec2 uTexel;
+uniform int uBypass;
+uniform float uSmooth, uBright, uMosaic;
 void main() {
-  // canvas座標(y上向き) → 映像座標(y下向き＝ランドマークと同じ、左右はミラー)
-  vec2 raw = vec2(uMirror == 1 ? 1.0 - vUv.x : vUv.x, 1.0 - vUv.y);
-
-  if (uBypass == 1 || uHasFace == 0) {
-    outColor = texture(uTex, raw);
-    return;
-  }
-
-  // 顔マスク（内側=1, 外側=0）。変形も加工もこの内側だけに限定して背景を歪ませない。
-  float mask = ovalMask(raw, uOvalC, uOvalR);
-
-  // 変形（目・輪郭）は顔の内側だけに適用。外側は raw のまま＝背景は歪まない。
-  vec2 warped = raw;
-  warped = slimFace(warped, uFaceCx, uOvalC, uOvalR, uSlim);
-  warped = magnify(warped, uEyeL, uEyeRad, uEye);
-  warped = magnify(warped, uEyeR, uEyeRad, uEye);
-  vec2 src = mix(raw, warped, mask);
-
-  vec3 col = texture(uTex, src).rgb;
-
-  // 美肌：周囲を平均したぼかしを顔マスクの範囲だけブレンド
-  if (uSmooth > 0.001 && mask > 0.001) {
+  vec3 col = texture(uTex, vUv).rgb;
+  if (uBypass == 1) { outColor = vec4(col, 1.0); return; }
+  float m = clamp(vMask, 0.0, 1.0);
+  if (uSmooth > 0.001 && m > 0.001) {
     vec3 blur = vec3(0.0);
-    float total = 0.0;
-    for (int y = -2; y <= 2; y++) {
-      for (int x = -2; x <= 2; x++) {
-        vec2 off = vec2(float(x), float(y)) * uTexel * 2.6;
-        blur += texture(uTex, src + off).rgb;
-        total += 1.0;
-      }
-    }
-    blur /= total;
-    col = mix(col, blur, clamp(uSmooth, 0.0, 0.9) * mask);
+    for (int y = -2; y <= 2; y++) for (int x = -2; x <= 2; x++)
+      blur += texture(uTex, vUv + vec2(float(x), float(y)) * uTexel * 2.6).rgb;
+    blur /= 25.0;
+    col = mix(col, blur, clamp(uSmooth, 0.0, 0.9) * m);
   }
-
-  // 明るさ・血色（顔だけ・控えめに）
-  col += uBright * mask * vec3(0.07, 0.035, 0.04);
-
-  // モザイク（顔だけ・匿名モード）。値が大きいほどブロックが粗くなる。
+  col += uBright * m * vec3(0.07, 0.035, 0.04);
   if (uMosaic > 0.001) {
     float blocks = mix(90.0, 14.0, clamp(uMosaic, 0.0, 1.0));
-    vec2 q = (floor(src * blocks) + 0.5) / blocks;
-    vec3 mos = texture(uTex, q).rgb;
-    col = mix(col, mos, mask * clamp(uMosaic * 1.3, 0.0, 1.0));
+    vec2 q = (floor(vUv * blocks) + 0.5) / blocks;
+    col = mix(col, texture(uTex, q).rgb, m * clamp(uMosaic * 1.3, 0.0, 1.0));
   }
-
-  col = clamp(col, 0.0, 1.0);
-
-  outColor = vec4(col, 1.0);
+  outColor = vec4(clamp(col, 0.0, 1.0), 1.0);
 }`;
 
-function compile(type, src) {
-  const s = gl.createShader(type);
-  gl.shaderSource(s, src);
-  gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
-    throw new Error(gl.getShaderInfoLog(s));
-  return s;
+function compile(type, s) {
+  const sh = gl.createShader(type); gl.shaderSource(sh, s); gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+  return sh;
 }
 const prog = gl.createProgram();
 gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
 gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
 gl.linkProgram(prog);
-if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
-  throw new Error(gl.getProgramInfoLog(prog));
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
 gl.useProgram(prog);
 
-const quad = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER, quad);
-gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
-const aPos = gl.getAttribLocation(prog, "aPos");
-gl.enableVertexAttribArray(aPos);
-gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+const bufPos = gl.createBuffer(), bufUv = gl.createBuffer(), bufMask = gl.createBuffer(), bufIdx = gl.createBuffer();
+const aPos = gl.getAttribLocation(prog, "aPos"), aUv = gl.getAttribLocation(prog, "aUv"), aMask = gl.getAttribLocation(prog, "aMask");
+gl.enableVertexAttribArray(aPos); gl.enableVertexAttribArray(aUv); gl.enableVertexAttribArray(aMask);
 
 const tex = gl.createTexture();
 gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -210,95 +131,215 @@ gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
 const U = {};
-for (const name of ["uTex","uTexel","uAspect","uHasFace","uBypass","uMirror","uSmooth","uBright","uEye","uSlim","uMosaic","uEyeL","uEyeR","uEyeRad","uFaceCx","uOvalC","uOvalR"]) {
-  U[name] = gl.getUniformLocation(prog, name);
-}
+for (const n of ["uTex","uTexel","uBypass","uMirror","uSmooth","uBright","uMosaic"]) U[n] = gl.getUniformLocation(prog, n);
 
 // ---------------- MediaPipe ----------------
 let faceLandmarker = null;
 async function initFace() {
-  const fileset = await FilesetResolver.forVisionTasks(
-    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
-  );
+  const fileset = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
   faceLandmarker = await FaceLandmarker.createFromOptions(fileset, {
-    baseOptions: {
-      modelAssetPath:
-        "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-      delegate: "GPU",
-    },
-    runningMode: "VIDEO",
-    numFaces: 1,
+    baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task", delegate: "GPU" },
+    runningMode: "VIDEO", numFaces: 1,
   });
 }
 
-// FaceLandmarker のランドマーク添字（478点・虹彩あり）
+// ランドマーク添字（478点）
 const IDX = {
   irisL: 468, irisR: 473,
   eyeLout: 33, eyeLin: 133, eyeRin: 362, eyeRout: 263,
-  cheekL: 234, cheekR: 454,
-  forehead: 10, chin: 152,
+  noseTop: 6, noseTip: 1, noseL: 98, noseR: 327,
+  lipTop: 13, lipBot: 14, mouthL: 61, mouthR: 291,
+  chin: 152, forehead: 10, cheekL: 234, cheekR: 454,
 };
+const NL = 478;          // ランドマーク数
+const RING = 20;         // 顔の外側の固定リング
+const BORDER = 8;        // 画面の四隅＋辺の中点（固定）
+const NV = NL + RING + BORDER;
 
-// ---------------- ループ ----------------
-let lastTime = 0, frames = 0, fpsT = 0;
+const src = new Float32Array(NV * 2);   // 元の位置（テクスチャ座標）
+const dst = new Float32Array(NV * 2);   // 変形後の位置
+const mask = new Float32Array(NV);
+let indices = null;                     // 三角形（Delaunay）
+let frameCount = 0;
 
-function setUniformsFromFace(lm) {
-  const eyeL = [lm[IDX.irisL].x, lm[IDX.irisL].y];
-  const eyeR = [lm[IDX.irisR].x, lm[IDX.irisR].y];
-  const eyeW = Math.hypot(lm[IDX.eyeLin].x - lm[IDX.eyeLout].x, lm[IDX.eyeLin].y - lm[IDX.eyeLout].y);
-  const faceCx = (lm[IDX.cheekL].x + lm[IDX.cheekR].x) / 2;
-  const ovalCx = (lm[IDX.cheekL].x + lm[IDX.cheekR].x) / 2;
-  const ovalCy = (lm[IDX.forehead].y + lm[IDX.chin].y) / 2;
-  const ovalRx = Math.abs(lm[IDX.cheekR].x - lm[IDX.cheekL].x) / 2 * 1.15;
-  const ovalRy = Math.abs(lm[IDX.chin].y - lm[IDX.forehead].y) / 2 * 1.1;
-
-  gl.uniform1i(U.uHasFace, 1);
-  gl.uniform2f(U.uEyeL, eyeL[0], eyeL[1]);
-  gl.uniform2f(U.uEyeR, eyeR[0], eyeR[1]);
-  gl.uniform1f(U.uEyeRad, Math.max(eyeW * 1.25, 0.025));
-  gl.uniform1f(U.uFaceCx, faceCx);
-  gl.uniform2f(U.uOvalC, ovalCx, ovalCy);
-  gl.uniform2f(U.uOvalR, ovalRx, ovalRy);
+// ---------------- Delaunay（Bowyer–Watson） ----------------
+function inCircumcircle(a, b, c, p) {
+  const ax = a[0]-p[0], ay = a[1]-p[1], bx = b[0]-p[0], by = b[1]-p[1], cx = c[0]-p[0], cy = c[1]-p[1];
+  const det = (ax*ax+ay*ay)*(bx*cy-cx*by) - (bx*bx+by*by)*(ax*cy-cx*ay) + (cx*cx+cy*cy)*(ax*by-bx*ay);
+  const orient = (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0]);
+  if (orient === 0) return false;
+  return orient > 0 ? det > 0 : det < 0;
+}
+function delaunay(pts) {
+  const n = pts.length;
+  const Pts = pts.concat([[-50,-50],[50,-50],[0,50]]);
+  let tris = [[n, n+1, n+2]];
+  for (let i = 0; i < n; i++) {
+    const p = Pts[i];
+    const bad = [], keep = [];
+    for (const t of tris) (inCircumcircle(Pts[t[0]], Pts[t[1]], Pts[t[2]], p) ? bad : keep).push(t);
+    const edges = new Map();
+    for (const t of bad) for (let e = 0; e < 3; e++) {
+      const a = t[e], b = t[(e+1)%3]; const k = a < b ? a*100000+b : b*100000+a;
+      edges.set(k, (edges.get(k) || 0) + 1);
+    }
+    tris = keep;
+    for (const [k, c] of edges) if (c === 1) tris.push([Math.floor(k/100000), k%100000, i]);
+  }
+  const out = [];
+  for (const t of tris) if (t[0] < n && t[1] < n && t[2] < n) out.push(t[0], t[1], t[2]);
+  return new Uint16Array(out);
 }
 
-function render() {
+// ---------------- 変形 ----------------
+const P = (arr, i) => [arr[i*2], arr[i*2+1]];
+const dist = (a, b) => Math.hypot(a[0]-b[0], a[1]-b[1]);
+const falloff = (d, R) => { const t = Math.min(d / R, 1); const u = 1 - t; return u * u * (3 - 2 * u); };
+
+function radial(cx, cy, R, fn) {
+  for (let i = 0; i < NL; i++) {
+    const x = src[i*2], y = src[i*2+1];
+    const d = Math.hypot(x - cx, y - cy);
+    if (d >= R) continue;
+    fn(i, x - cx, y - cy, falloff(d, R));
+  }
+}
+
+function deform(c) {
+  dst.set(src);
+  const irisL = P(src, IDX.irisL), irisR = P(src, IDX.irisR);
+  const eyeW = dist(P(src, IDX.eyeLin), P(src, IDX.eyeLout));
+  const eyeDist = dist(irisL, irisR);
+  const cheekL = P(src, IDX.cheekL), cheekR = P(src, IDX.cheekR);
+  const chin = P(src, IDX.chin), forehead = P(src, IDX.forehead);
+  const faceW = dist(cheekL, cheekR), faceH = dist(chin, forehead);
+  const faceCx = (cheekL[0] + cheekR[0]) / 2, faceCy = (chin[1] + forehead[1]) / 2;
+  const cheekY = (cheekL[1] + cheekR[1]) / 2, chinY = chin[1];
+  const noseTip = P(src, IDX.noseTip), noseTop = P(src, IDX.noseTop);
+  const nL = P(src, IDX.noseL), nR = P(src, IDX.noseR);
+  const noseC = [(nL[0] + nR[0]) / 2, (nL[1] + nR[1]) / 2];
+  const noseWidth = dist(nL, nR), noseLen = dist(noseTop, noseTip);
+  const lipTop = P(src, IDX.lipTop), lipBot = P(src, IDX.lipBot);
+  const mouthC = [(lipTop[0] + lipBot[0]) / 2, (lipTop[1] + lipBot[1]) / 2];
+  const mouthW = dist(P(src, IDX.mouthL), P(src, IDX.mouthR));
+
+  // 目：大きさ・間隔・傾き（左右それぞれ）
+  const eyes = [[irisL, irisL[0] < irisR[0] ? -1 : 1], [irisR, irisR[0] < irisL[0] ? -1 : 1]];
+  for (const [eye, sign] of eyes) {
+    const R = eyeW * 1.9;
+    const ang = -sign * c.eyeTilt * Math.PI / 180; // 正=つり目（外側の目尻が上がる）
+    const cs = Math.cos(ang), sn = Math.sin(ang);
+    radial(eye[0], eye[1], R, (i, dx, dy, w) => {
+      let ox = dx * c.eyeSize * w, oy = dy * c.eyeSize * w;                 // 大きさ
+      ox += (dx * cs - dy * sn - dx) * w; oy += (dx * sn + dy * cs - dy) * w; // 傾き
+      ox += sign * c.eyeSpace * eyeDist * w;                                 // 間隔
+      dst[i*2] += ox; dst[i*2+1] += oy;
+    });
+  }
+  // 鼻：幅・長さ
+  radial(noseC[0], noseC[1], noseWidth * 1.5, (i, dx, dy, w) => { dst[i*2] += dx * c.noseW * w; });
+  radial(noseTip[0], noseTip[1], noseLen * 0.9, (i, dx, dy, w) => { dst[i*2+1] += c.noseL * noseLen * w; });
+  // 口：唇の厚み・幅
+  radial(mouthC[0], mouthC[1], mouthW * 0.85, (i, dx, dy, w) => { dst[i*2+1] += dy * c.lipFull * w; });
+  radial(mouthC[0], mouthC[1], mouthW * 0.95, (i, dx, dy, w) => { dst[i*2] += dx * c.mouthW * w; });
+  // あご：幅（正=細く）・長さ
+  for (let i = 0; i < NL; i++) {
+    const y = src[i*2+1];
+    if (y <= cheekY) continue;
+    const t = Math.min((y - cheekY) / Math.max(chinY - cheekY, 1e-4), 1);
+    const w = t * t * (3 - 2 * t);
+    dst[i*2] += (faceCx - src[i*2]) * c.jawW * w;
+  }
+  radial(chin[0], chin[1], faceH * 0.35, (i, dx, dy, w) => { dst[i*2+1] += c.chinL * faceH * 0.5 * w; });
+  // 頬：張り（正=外へ）
+  const cheeks = [[cheekL, cheekL[0] < cheekR[0] ? -1 : 1], [cheekR, cheekR[0] < cheekL[0] ? -1 : 1]];
+  for (const [ck, sign] of cheeks) {
+    radial(ck[0], ck[1], faceW * 0.35, (i, dx, dy, w) => { dst[i*2] += sign * c.cheek * faceW * 0.5 * w; });
+  }
+  // 顔の長さ
+  if (c.faceL !== 0) for (let i = 0; i < NL; i++) dst[i*2+1] += (src[i*2+1] - faceCy) * c.faceL;
+
+  // 肌マスク：顔内=1、目・口まわりは弱める（ぼかしでディテールを潰さない）
+  for (let i = 0; i < NL; i++) {
+    const x = src[i*2], y = src[i*2+1];
+    let m = 1;
+    for (const e of [irisL, irisR]) m -= falloff(Math.hypot(x - e[0], y - e[1]), eyeW * 1.35);
+    m -= falloff(Math.hypot(x - mouthC[0], y - mouthC[1]), mouthW * 0.6) * 0.8;
+    mask[i] = Math.max(0, m);
+  }
+}
+
+function buildOuter(lm) {
+  // 顔の外側リング（固定）＋画面の縁（固定）＝ 背景は絶対に動かない
+  const cheekL = lm[IDX.cheekL], cheekR = lm[IDX.cheekR], chin = lm[IDX.chin], forehead = lm[IDX.forehead];
+  const cx = (cheekL.x + cheekR.x) / 2, cy = (chin.y + forehead.y) / 2;
+  const rx = Math.abs(cheekR.x - cheekL.x) * 1.05, ry = Math.abs(chin.y - forehead.y) * 0.8;
+  for (let k = 0; k < RING; k++) {
+    const a = (k / RING) * Math.PI * 2, i = NL + k;
+    src[i*2] = cx + Math.cos(a) * rx; src[i*2+1] = cy + Math.sin(a) * ry; mask[i] = 0;
+  }
+  const border = [[0,0],[0.5,0],[1,0],[1,0.5],[1,1],[0.5,1],[0,1],[0,0.5]];
+  for (let k = 0; k < BORDER; k++) { const i = NL + RING + k; src[i*2] = border[k][0]; src[i*2+1] = border[k][1]; mask[i] = 0; }
+}
+
+function updateFromLandmarks(lm) {
+  for (let i = 0; i < NL; i++) { src[i*2] = lm[i].x; src[i*2+1] = lm[i].y; }
+  buildOuter(lm);
+  if (!indices || frameCount % 30 === 0) {
+    const pts = []; for (let i = 0; i < NV; i++) pts.push([src[i*2], src[i*2+1]]);
+    indices = delaunay(pts);
+  }
+  if (bypass) dst.set(src); else deform(controls);
+  for (let i = NL; i < NV; i++) { dst[i*2] = src[i*2]; dst[i*2+1] = src[i*2+1]; } // 固定点
+}
+
+// 顔なし：全画面をそのまま描く
+const QUAD_POS = new Float32Array([0,0, 1,0, 0,1, 1,1]);
+const QUAD_IDX = new Uint16Array([0,1,2, 1,3,2]);
+const QUAD_MASK = new Float32Array([0,0,0,0]);
+
+function drawMesh(pos, uv, msk, idx) {
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufPos); gl.bufferData(gl.ARRAY_BUFFER, pos, gl.DYNAMIC_DRAW);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufUv); gl.bufferData(gl.ARRAY_BUFFER, uv, gl.DYNAMIC_DRAW);
+  gl.vertexAttribPointer(aUv, 2, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufMask); gl.bufferData(gl.ARRAY_BUFFER, msk, gl.DYNAMIC_DRAW);
+  gl.vertexAttribPointer(aMask, 1, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufIdx); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.DYNAMIC_DRAW);
+  gl.drawElements(gl.TRIANGLES, idx.length, gl.UNSIGNED_SHORT, 0);
+}
+
+function render(hasFace) {
   gl.uniform1i(U.uTex, 0);
   gl.uniform2f(U.uTexel, 1 / canvas.width, 1 / canvas.height);
-  gl.uniform1f(U.uAspect, canvas.width / canvas.height);
   gl.uniform1i(U.uBypass, bypass ? 1 : 0);
   gl.uniform1i(U.uMirror, 1);
   gl.uniform1f(U.uSmooth, controls.smooth);
   gl.uniform1f(U.uBright, controls.bright);
-  gl.uniform1f(U.uEye, controls.eye);
-  gl.uniform1f(U.uSlim, controls.slim);
   gl.uniform1f(U.uMosaic, controls.mosaic);
 
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, tex);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
-
   gl.viewport(0, 0, canvas.width, canvas.height);
-  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  if (hasFace && indices) drawMesh(dst, src, mask, indices);
+  else drawMesh(QUAD_POS, QUAD_POS, QUAD_MASK, QUAD_IDX);
 }
 
+// ---------------- ループ ----------------
+let frames = 0, fpsT = 0;
 function loop(now) {
   if (video.readyState >= 2) {
+    let hasFace = false;
     if (faceLandmarker) {
       const res = faceLandmarker.detectForVideo(video, now);
-      if (res.faceLandmarks && res.faceLandmarks.length > 0) {
-        setUniformsFromFace(res.faceLandmarks[0]);
-      } else {
-        gl.uniform1i(U.uHasFace, 0);
-      }
+      if (res.faceLandmarks && res.faceLandmarks.length > 0) { updateFromLandmarks(res.faceLandmarks[0]); hasFace = true; }
     }
-    render();
-
-    // FPS
-    frames++;
-    if (now - fpsT > 500) {
-      fpsEl.textContent = Math.round((frames * 1000) / (now - fpsT)) + " fps";
-      frames = 0; fpsT = now;
-    }
+    render(hasFace);
+    frameCount++; frames++;
+    if (now - fpsT > 500) { fpsEl.textContent = Math.round((frames * 1000) / (now - fpsT)) + " fps"; frames = 0; fpsT = now; }
   }
   requestAnimationFrame(loop);
 }
@@ -308,24 +349,17 @@ async function start() {
   startBtn.disabled = true;
   statusEl.textContent = "カメラとモデルを準備中…";
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: 640, height: 480, facingMode: "user" },
-      audio: false,
-    });
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: "user" }, audio: false });
     video.srcObject = stream;
     await video.play();
     canvas.width = video.videoWidth || 640;
     canvas.height = video.videoHeight || 480;
-
     await initFace();
-
     statusEl.style.display = "none";
     compareBtn.disabled = false;
     fpsT = performance.now();
     requestAnimationFrame(loop);
-
-    // WebRTCへ渡すための加工済みストリーム（次フェーズで使用）
-    window.processedStream = canvas.captureStream(30);
+    window.processedStream = canvas.captureStream(30); // WebRTCへ渡す加工済み映像
   } catch (e) {
     console.error(e);
     statusEl.textContent = "起動に失敗: " + e.message + "\n（httpsまたはlocalhostで開いてください）";

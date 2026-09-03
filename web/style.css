@@ -62,5 +62,6 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 
 .presets { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); }
 .presets button { padding: 6px 12px; font-size: 13px; }
+.grp { margin: 6px 0 -4px; font-size: 12px; letter-spacing: .14em; color: var(--accent); font-weight: 700; }
 .note { font-size: 12px; color: var(--muted); line-height: 1.6; margin: 4px 0 0; }
 .note strong { color: var(--text); }
