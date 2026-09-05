@@ -18,17 +18,19 @@ const compareBtn = document.getElementById("compareBtn");
 
 // ---------------- パラメータ ----------------
 const controls = {
-  smooth: 0.50, bright: 0.28, mosaic: 0.0,
-  eyeSize: 0.12, eyeSpace: 0.0, eyeTilt: 0.0,
+  smooth: 0.78, bright: 0.71, mosaic: 0.0,
+  eyeSize: 0.01, eyeSpace: 0.0, eyeTilt: 0.0,
   noseW: -0.08, noseL: 0.0,
-  lipFull: 0.10, mouthW: 0.0,
-  jawW: 0.12, chinL: 0.0, cheek: 0.0, faceL: 0.0,
+  lipFull: 0.08, mouthW: 0.0,
+  jawW: 0.01, chinL: 0.02, cheek: 0.0, faceL: -0.02,
 };
 const PRESETS = {
   reset:   { smooth:0, bright:0, mosaic:0, eyeSize:0, eyeSpace:0, eyeTilt:0, noseW:0, noseL:0, lipFull:0, mouthW:0, jawW:0, chinL:0, cheek:0, faceL:0 },
-  natural: { smooth:.45, bright:.25, eyeSize:.08, eyeSpace:0, eyeTilt:0, noseW:-.08, noseL:0, lipFull:.08, mouthW:0, jawW:.10, chinL:0, cheek:0, faceL:0 },
-  beauty:  { smooth:.55, bright:.32, eyeSize:.16, eyeSpace:0, eyeTilt:2, noseW:-.15, noseL:-.05, lipFull:.18, mouthW:.03, jawW:.20, chinL:.04, cheek:-.05, faceL:0 },
-  another: { smooth:.55, bright:.30, eyeSize:.28, eyeSpace:.06, eyeTilt:6, noseW:-.22, noseL:.12, lipFull:.30, mouthW:-.05, jawW:.30, chinL:.12, cheek:-.10, faceL:.05 },
+  // ナチュラル：肌はしっかり、形はほぼ触らない（ユーザー指定値）
+  natural: { smooth:.78, bright:.71, eyeSize:.01, eyeSpace:0, eyeTilt:0, noseW:-.08, noseL:0, lipFull:.08, mouthW:0, jawW:.01, chinL:.02, cheek:0, faceL:-.02 },
+  // 美人・別人寄り：変形量を従来の半分程度に抑えた
+  beauty:  { smooth:.78, bright:.62, eyeSize:.08, eyeSpace:0, eyeTilt:1, noseW:-.12, noseL:-.03, lipFull:.12, mouthW:.02, jawW:.10, chinL:.03, cheek:-.03, faceL:-.01 },
+  another: { smooth:.78, bright:.62, eyeSize:.16, eyeSpace:.03, eyeTilt:3, noseW:-.16, noseL:.06, lipFull:.18, mouthW:-.03, jawW:.18, chinL:.07, cheek:-.06, faceL:.02 },
 };
 
 function fmt(v) { return Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(2); }
